@@ -615,6 +615,7 @@ func SignHash(hexEncodedHash string) string {
 }
 
 func Foo() {
-	logger.Print("foo")
+	logger.Info("foo")
+	logger.Error("foo2")
 }
 
