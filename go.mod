@@ -1,4 +1,4 @@
-module github.com/status-im/status-go
+module github.com/pacamara/status-go
 
 go 1.12
 
