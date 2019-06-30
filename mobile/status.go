@@ -642,3 +642,8 @@ func SignHash(hexEncodedHash string) string {
 
 	return hexEncodedSignature
 }
+
+func Foo() {
+	logger.Print("foo")
+}
+
