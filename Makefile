@@ -172,7 +172,6 @@ setup: setup-build setup-dev tidy ##@other Prepare project for development and b
 
 generate: ##@other Regenerate assets and other auto-generated stuff
 	go generate ./static ./static/chat_db_migrations ./static/mailserver_db_migrations ./t
-	$(shell cd ./messaging/chat/protobuf && exec protoc --go_out=. ./*.proto)
 
 prepare-release: clean-release
 	mkdir -p $(RELEASE_DIR)
@@ -185,7 +184,13 @@ prepare-release: clean-release
 clean-release:
 	rm -rf $(RELEASE_DIR)
 
-release:
+check-existing-release:
+	@git ls-remote --exit-code origin "v$(RELEASE_TAG)" >/dev/null && \
+		echo "$(YELLOW)Release tag already exists: v$(RELEASE_TAG)$(RESET)"; \
+		echo "Remove the tag/release if you want to re-create it."; \
+		exit 1
+
+release: check-existing-release
 	@read -p "Are you sure you want to create a new GitHub $(RELEASE_TYPE) against $(RELEASE_BRANCH) branch? (y/n): " REPLY; \
 	if [ $$REPLY = "y" ]; then \
 		latest_tag=$$(git describe --tags `git rev-list --tags --max-count=1`); \
@@ -227,7 +232,6 @@ mock-install: ##@other Install mocking tools
 mock: ##@other Regenerate mocks
 	mockgen -package=fcm          -destination=notifications/push/fcm/client_mock.go -source=notifications/push/fcm/client.go
 	mockgen -package=fake         -destination=transactions/fake/mock.go             -source=transactions/fake/txservice.go
-	mockgen -package=account      -destination=account/accounts_mock.go              -source=account/accounts.go
 	mockgen -package=status       -destination=services/status/account_mock.go       -source=services/status/service.go
 	mockgen -package=peer         -destination=services/peer/discoverer_mock.go      -source=services/peer/service.go
 

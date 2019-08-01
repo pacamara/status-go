@@ -25,6 +25,7 @@ func TestBackendStartNodeConcurrently(t *testing.T) {
 	backend := NewStatusBackend()
 	config, err := utils.MakeTestNodeConfig(params.StatusChainNetworkID)
 	require.NoError(t, err)
+	require.NoError(t, backend.AccountManager().InitKeystore(config.KeyStoreDir))
 	count := 2
 	resultCh := make(chan error)
 
@@ -58,9 +59,8 @@ func TestBackendRestartNodeConcurrently(t *testing.T) {
 	config, err := utils.MakeTestNodeConfig(params.StatusChainNetworkID)
 	require.NoError(t, err)
 	count := 3
-
-	err = backend.StartNode(config)
-	require.NoError(t, err)
+	require.NoError(t, backend.AccountManager().InitKeystore(config.KeyStoreDir))
+	require.NoError(t, backend.StartNode(config))
 	defer func() {
 		require.NoError(t, backend.StopNode())
 	}()
@@ -84,7 +84,7 @@ func TestBackendGettersConcurrently(t *testing.T) {
 	backend := NewStatusBackend()
 	config, err := utils.MakeTestNodeConfig(params.StatusChainNetworkID)
 	require.NoError(t, err)
-
+	require.NoError(t, backend.AccountManager().InitKeystore(config.KeyStoreDir))
 	err = backend.StartNode(config)
 	require.NoError(t, err)
 	defer func() {
@@ -136,7 +136,7 @@ func TestBackendAccountsConcurrently(t *testing.T) {
 	backend := NewStatusBackend()
 	config, err := utils.MakeTestNodeConfig(params.StatusChainNetworkID)
 	require.NoError(t, err)
-
+	require.NoError(t, backend.AccountManager().InitKeystore(config.KeyStoreDir))
 	err = backend.StartNode(config)
 	require.NoError(t, err)
 	defer func() {
@@ -167,7 +167,12 @@ func TestBackendAccountsConcurrently(t *testing.T) {
 	for tuple := range addressCh {
 		wg.Add(1)
 		go func(tuple [3]string) {
-			assert.NoError(t, backend.SelectAccount(tuple[0], tuple[1], tuple[2]))
+			loginParams := account.LoginParams{
+				MainAccount: common.HexToAddress(tuple[0]),
+				ChatAddress: common.HexToAddress(tuple[1]),
+				Password:    tuple[2],
+			}
+			assert.NoError(t, backend.SelectAccount(loginParams))
 			wg.Done()
 		}(tuple)
 
@@ -191,6 +196,7 @@ func TestBackendInjectChatAccount(t *testing.T) {
 	backend := NewStatusBackend()
 	config, err := utils.MakeTestNodeConfig(params.StatusChainNetworkID)
 	require.NoError(t, err)
+	require.NoError(t, backend.AccountManager().InitKeystore(config.KeyStoreDir))
 	err = backend.StartNode(config)
 	require.NoError(t, err)
 	defer func() {
@@ -219,8 +225,8 @@ func TestBackendInjectChatAccount(t *testing.T) {
 	require.True(t, whisperService.HasKeyPair(chatPubKeyHex), "identity not injected into whisper")
 
 	// wallet account should not be selected
-	walletAcc, err := backend.AccountManager().SelectedWalletAccount()
-	require.Nil(t, walletAcc)
+	mainAccountAddress, err := backend.AccountManager().MainAccountAddress()
+	require.Equal(t, common.Address{}, mainAccountAddress)
 	require.Equal(t, account.ErrNoAccountSelected, err)
 
 	// selected chat account should have the key injected previously
@@ -264,6 +270,7 @@ func TestBackendCallRPCConcurrently(t *testing.T) {
 	backend := NewStatusBackend()
 	config, err := utils.MakeTestNodeConfig(params.StatusChainNetworkID)
 	require.NoError(t, err)
+	require.NoError(t, backend.AccountManager().InitKeystore(config.KeyStoreDir))
 	count := 3
 
 	err = backend.StartNode(config)
@@ -337,6 +344,7 @@ func TestBlockedRPCMethods(t *testing.T) {
 	backend := NewStatusBackend()
 	config, err := utils.MakeTestNodeConfig(params.StatusChainNetworkID)
 	require.NoError(t, err)
+	require.NoError(t, backend.AccountManager().InitKeystore(config.KeyStoreDir))
 	err = backend.StartNode(config)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, backend.StopNode()) }()
@@ -374,6 +382,7 @@ func TestStartStopMultipleTimes(t *testing.T) {
 	backend := NewStatusBackend()
 	config, err := utils.MakeTestNodeConfig(params.StatusChainNetworkID)
 	require.NoError(t, err)
+	require.NoError(t, backend.AccountManager().InitKeystore(config.KeyStoreDir))
 	config.NoDiscovery = false
 	// doesn't have to be running. just any valid enode to bypass validation.
 	config.ClusterConfig.BootNodes = []string{
@@ -390,6 +399,7 @@ func TestSignHash(t *testing.T) {
 	backend := NewStatusBackend()
 	config, err := utils.MakeTestNodeConfig(params.StatusChainNetworkID)
 	require.NoError(t, err)
+	require.NoError(t, backend.AccountManager().InitKeystore(config.KeyStoreDir))
 
 	require.NoError(t, backend.StartNode(config))
 	defer func() {
@@ -427,6 +437,7 @@ func TestHashTypedData(t *testing.T) {
 	backend := NewStatusBackend()
 	config, err := utils.MakeTestNodeConfig(params.StatusChainNetworkID)
 	require.NoError(t, err)
+	require.NoError(t, backend.AccountManager().InitKeystore(config.KeyStoreDir))
 	err = backend.StartNode(config)
 	require.NoError(t, err)
 	defer func() {

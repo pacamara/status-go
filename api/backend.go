@@ -18,8 +18,8 @@ import (
 	gethnode "github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/status-im/status-go/account"
+	"github.com/status-im/status-go/crypto"
 	"github.com/status-im/status-go/mailserver/registry"
-	"github.com/status-im/status-go/messaging/crypto"
 	"github.com/status-im/status-go/node"
 	"github.com/status-im/status-go/notifications/push/fcm"
 	"github.com/status-im/status-go/params"
@@ -70,7 +70,7 @@ func NewStatusBackend() *StatusBackend {
 	defer log.Info("Status backend initialized", "version", params.Version, "commit", params.GitCommit)
 
 	statusNode := node.New()
-	accountManager := account.NewManager(statusNode)
+	accountManager := account.NewManager()
 	transactor := transactions.NewTransactor()
 	personalAPI := personal.NewAPI()
 	notificationManager := fcm.NewNotification(fcmServerKey)
@@ -149,12 +149,17 @@ func (b *StatusBackend) startNode(config *params.NodeConfig) (err error) {
 	services = appendIf(config.UpstreamConfig.Enabled, services, b.rpcFiltersService())
 	services = append(services, b.subscriptionService())
 
+	manager := b.accountManager.GetManager()
+	if manager == nil {
+		return errors.New("ethereum accounts.Manager is nil")
+	}
 	if err = b.statusNode.StartWithOptions(config, node.StartOptions{
 		Services: services,
 		// The peers discovery protocols are started manually after
 		// `node.ready` signal is sent.
 		// It was discussed in https://github.com/status-im/status-go/pull/1333.
-		StartDiscovery: false,
+		StartDiscovery:  false,
+		AccountsManager: manager,
 	}); err != nil {
 		return
 	}
@@ -295,7 +300,7 @@ func (b *StatusBackend) CallPrivateRPC(inputJSON string) (string, error) {
 
 // SendTransaction creates a new transaction and waits until it's complete.
 func (b *StatusBackend) SendTransaction(sendArgs transactions.SendTxArgs, password string) (hash gethcommon.Hash, err error) {
-	verifiedAccount, err := b.getVerifiedWalletAccount(password)
+	verifiedAccount, err := b.getVerifiedWalletAccount(sendArgs.From.String(), password)
 	if err != nil {
 		return hash, err
 	}
@@ -329,7 +334,7 @@ func (b *StatusBackend) HashTransaction(sendArgs transactions.SendTxArgs) (trans
 // SignMessage checks the pwd vs the selected account and passes on the signParams
 // to personalAPI for message signature
 func (b *StatusBackend) SignMessage(rpcParams personal.SignParams) (hexutil.Bytes, error) {
-	verifiedAccount, err := b.getVerifiedWalletAccount(rpcParams.Password)
+	verifiedAccount, err := b.getVerifiedWalletAccount(rpcParams.Address, rpcParams.Password)
 	if err != nil {
 		return hexutil.Bytes{}, err
 	}
@@ -343,8 +348,8 @@ func (b *StatusBackend) Recover(rpcParams personal.RecoverParams) (gethcommon.Ad
 }
 
 // SignTypedData accepts data and password. Gets verified account and signs typed data.
-func (b *StatusBackend) SignTypedData(typed typeddata.TypedData, password string) (hexutil.Bytes, error) {
-	account, err := b.getVerifiedWalletAccount(password)
+func (b *StatusBackend) SignTypedData(typed typeddata.TypedData, address string, password string) (hexutil.Bytes, error) {
+	account, err := b.getVerifiedWalletAccount(address, password)
 	if err != nil {
 		return hexutil.Bytes{}, err
 	}
@@ -366,19 +371,40 @@ func (b *StatusBackend) HashTypedData(typed typeddata.TypedData) (common.Hash, e
 	return hash, err
 }
 
-func (b *StatusBackend) getVerifiedWalletAccount(password string) (*account.SelectedExtKey, error) {
-	selectedWalletAccount, err := b.accountManager.SelectedWalletAccount()
-	if err != nil {
-		b.log.Error("failed to get a selected account", "err", err)
-		return nil, err
-	}
+func (b *StatusBackend) getVerifiedWalletAccount(address, password string) (*account.SelectedExtKey, error) {
 	config := b.StatusNode().Config()
-	_, err = b.accountManager.VerifyAccountPassword(config.KeyStoreDir, selectedWalletAccount.Address.String(), password)
+
+	var validAddress bool
+
+	addresses := b.accountManager.WatchAddresses()
+	mainAccountAddress, err := b.accountManager.MainAccountAddress()
 	if err != nil {
-		b.log.Error("failed to verify account", "account", selectedWalletAccount.Address.String(), "error", err)
 		return nil, err
 	}
-	return selectedWalletAccount, nil
+
+	addresses = append(addresses, mainAccountAddress)
+	for _, a := range addresses {
+		if a.String() == address {
+			validAddress = true
+			break
+		}
+	}
+
+	if !validAddress {
+		b.log.Error("failed to get a selected account", "err", transactions.ErrInvalidTxSender)
+		return nil, transactions.ErrInvalidTxSender
+	}
+
+	key, err := b.accountManager.VerifyAccountPassword(config.KeyStoreDir, address, password)
+	if err != nil {
+		b.log.Error("failed to verify account", "account", address, "error", err)
+		return nil, err
+	}
+
+	return &account.SelectedExtKey{
+		Address:    key.Address,
+		AccountKey: key,
+	}, nil
 }
 
 // registerHandlers attaches Status callback handlers to running node
@@ -486,6 +512,7 @@ func (b *StatusBackend) Logout() error {
 			return err
 		}
 	}
+
 	if b.statusNode.Config().BrowsersConfig.Enabled {
 		svc, err := b.statusNode.BrowsersService()
 		switch err {
@@ -530,13 +557,13 @@ func (b *StatusBackend) reSelectAccount() error {
 // SelectAccount selects current wallet and chat accounts, by verifying that each address has corresponding account which can be decrypted
 // using provided password. Once verification is done, the decrypted chat key is injected into Whisper (as a single identity,
 // all previous identities are removed).
-func (b *StatusBackend) SelectAccount(walletAddress, chatAddress, password string) error {
+func (b *StatusBackend) SelectAccount(loginParams account.LoginParams) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	b.AccountManager().RemoveOnboarding()
 
-	err := b.accountManager.SelectAccount(walletAddress, chatAddress, password)
+	err := b.accountManager.SelectAccount(loginParams)
 	if err != nil {
 		return err
 	}
@@ -563,33 +590,47 @@ func (b *StatusBackend) SelectAccount(walletAddress, chatAddress, password strin
 			return err
 		}
 
-		if err := st.InitProtocolWithPassword(chatAddress, password); err != nil {
+		if err := st.InitProtocolWithPassword(loginParams.ChatAddress.String(), loginParams.Password); err != nil {
 			return err
 		}
 	}
-	err = b.startWallet(password)
+
+	err = b.startWallet(loginParams.Password)
 	if err != nil {
 		return err
 	}
-	return b.startBrowsers(password)
+
+	err = b.startBrowsers(loginParams.Password)
+	if err != nil {
+		return err
+	}
+
+	return b.startPermissions(loginParams.Password)
 }
 
 func (b *StatusBackend) startWallet(password string) error {
 	if !b.statusNode.Config().WalletConfig.Enabled {
 		return nil
 	}
+
 	wallet, err := b.statusNode.WalletService()
 	if err != nil {
 		return err
 	}
-	account, err := b.accountManager.SelectedWalletAccount()
+
+	watchAddresses := b.accountManager.WatchAddresses()
+	mainAccountAddress, err := b.accountManager.MainAccountAddress()
 	if err != nil {
 		return err
 	}
-	path := path.Join(b.statusNode.Config().DataDir, fmt.Sprintf("wallet-%x.sql", account.Address))
+
+	allAddresses := make([]common.Address, len(watchAddresses)+1)
+	allAddresses[0] = mainAccountAddress
+	copy(allAddresses[1:], watchAddresses)
+	path := path.Join(b.statusNode.Config().DataDir, fmt.Sprintf("wallet-%x.sql", mainAccountAddress))
 	return wallet.StartReactor(path, password,
 		b.statusNode.RPCClient().Ethclient(),
-		[]common.Address{account.Address},
+		allAddresses,
 		new(big.Int).SetUint64(b.statusNode.Config().NetworkID))
 }
 
@@ -601,11 +642,29 @@ func (b *StatusBackend) startBrowsers(password string) error {
 	if err != nil {
 		return err
 	}
-	account, err := b.accountManager.SelectedWalletAccount()
+
+	mainAccountAddress, err := b.accountManager.MainAccountAddress()
 	if err != nil {
 		return err
 	}
-	path := path.Join(b.statusNode.Config().DataDir, fmt.Sprintf("browsers-%x.sql", account.Address))
+
+	path := path.Join(b.statusNode.Config().DataDir, fmt.Sprintf("browsers-%x.sql", mainAccountAddress))
+	return svc.StartDatabase(path, password)
+}
+
+func (b *StatusBackend) startPermissions(password string) error {
+	if !b.statusNode.Config().PermissionsConfig.Enabled {
+		return nil
+	}
+	svc, err := b.statusNode.PermissionsService()
+	if err != nil {
+		return err
+	}
+	mainAccountAddress, err := b.accountManager.MainAccountAddress()
+	if err != nil {
+		return err
+	}
+	path := path.Join(b.statusNode.Config().DataDir, fmt.Sprintf("permissions-%x.sql", mainAccountAddress))
 	return svc.StartDatabase(path, password)
 }
 
